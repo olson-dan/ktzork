@@ -328,7 +328,7 @@ class Instruction(private val memory: Memory, private val ip: Int) {
     }
 }
 
-class Frame(val addr : Int, val stackStart : Int, val numLocals :Int, val returnStorage: Return, val returnAddr: Int)
+class Frame(val addr: Int, val stackStart: Int, val numLocals: Int, val returnStorage: Return, val returnAddr: Int)
 
 class Machine(private var memory: Memory, private val header: Header) {
     private var finished: Boolean = false
@@ -344,14 +344,14 @@ class Machine(private var memory: Memory, private val header: Header) {
     }
 
     private fun writeLocal(v: Int, value: Int) {
-        if(frames.size > 0){
+        if (frames.size > 0) {
             val frame = frames.lastElement()
             val index = frame.stackStart + v
             stack[index] = value
         }
     }
 
-    private fun readLocal(v: Int) : Int  {
+    private fun readLocal(v: Int): Int {
         return if (frames.size > 0) {
             val frame = frames.lastElement()
             val index = frame.stackStart + v
@@ -361,7 +361,7 @@ class Machine(private var memory: Memory, private val header: Header) {
         }
     }
 
-    private fun readGlobal(v: Int) : Int {
+    private fun readGlobal(v: Int): Int {
         val offset = header.globals + header.dynamicStart + v * 2
         return memory.readU16(offset)
     }
@@ -371,9 +371,9 @@ class Machine(private var memory: Memory, private val header: Header) {
         memory.writeU16(offset, value)
     }
 
-    private fun readVar(v: Operand) : Int {
+    private fun readVar(v: Operand): Int {
         return if (v.type == OperandType.Variable || v.type == OperandType.Indirect) {
-            if(v.value >= 0x10) {
+            if (v.value >= 0x10) {
                 readGlobal(v.value - 0x10)
             } else if (v.value == 0) {
                 if (v.type == OperandType.Indirect) {
@@ -391,7 +391,7 @@ class Machine(private var memory: Memory, private val header: Header) {
 
     private fun writeVar(v: Return, value: Int) {
         if (v.retType == RetType.Variable || v.retType == RetType.Indirect) {
-            if(v.value >= 0x10) {
+            if (v.value >= 0x10) {
                 writeGlobal(v.value - 0x10, value)
             } else if (v.value == 0) {
                 if (v.retType != RetType.Indirect) {
@@ -424,12 +424,13 @@ class Machine(private var memory: Memory, private val header: Header) {
             ip = addr + 1 + numLocals * 2
         }
     }
+
     private fun execute(i: Instruction) {
         val startIP = ip
         when (i.name) {
             "call" -> call(i)
             "store" -> {
-                val (x, y) = i.args.map{ readVar(it) }
+                val (x, y) = i.args.map { readVar(it) }
                 writeVar(Return(RetType.Indirect, x), y)
             }
             else -> {
