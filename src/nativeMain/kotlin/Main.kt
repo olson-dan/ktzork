@@ -125,12 +125,15 @@ enum class ZStringShift {
     ZERO, ONE, TWO
 }
 
-class ZString(private val memory: Memory, private val offset: Int) {
+open class ZString(private val memory: Memory, private val offset: Int) {
     var length = 0
     var contents = ""
-    var maxLength: Int? = null
 
     init {
+        withBytes(memory, decode(null))
+    }
+
+    protected fun decode(maxLength: Int?): ByteArray {
         var bytes = ArrayList<Byte>()
         while (true) {
             if (length == maxLength) {
@@ -147,10 +150,10 @@ class ZString(private val memory: Memory, private val offset: Int) {
                 break
             }
         }
-        withBytes(memory, bytes.toByteArray())
+        return bytes.toByteArray()
     }
 
-    fun withBytes(memory: Memory, bytes: ByteArray) {
+    protected fun withBytes(memory: Memory, bytes: ByteArray) {
         var shift = ZStringShift.ZERO
         var skipCount = 0
         bytes.forEachIndexed { index, c ->
@@ -174,7 +177,8 @@ class ZString(private val memory: Memory, private val offset: Int) {
                     else -> {
                         if (shift == ZStringShift.TWO && c.toInt() == 6) {
                             skipCount = 2
-                            // TODO
+                            val (x, y) = bytes.slice(index + 1..index + 2).map { it.toInt() }
+                            contents += x.shl(5).or(y.and(0x1f)).toChar()
                         } else {
                             contents += when (shift) {
                                 ZStringShift.ZERO -> "______abcdefghijklmnopqrstuvwxyz"[c.toInt()]
@@ -194,24 +198,26 @@ class ZString(private val memory: Memory, private val offset: Int) {
     }
 }
 
+class ZStringFixed(private val memory: Memory, private val offset: Int, private val maxLength: Int) :
+    ZString(memory, offset) {
+    init {
+        withBytes(memory, decode(null))
+    }
+}
+
 class Memory(private val memory: ByteArray) {
     val length = memory.size
 
-    fun readU16(offset: Int): Int {
-        return ((memory[offset].toUByte().toInt() shl 8) or memory[offset + 1].toUByte().toInt())
-    }
-
-    fun readU8(offset: Int): Int {
-        return memory[offset].toUByte().toInt()
-    }
+    fun readU16(offset: Int) = (readU8(offset).shl(8).or(readU8(offset + 1)))
+    fun readU8(offset: Int) = memory[offset].toUByte().toInt()
 
     fun writeU8(offset: Int, value: Int) {
         memory[offset] = (value and 0xff).toByte()
     }
 
     fun writeU16(offset: Int, value: Int) {
-        memory[offset] = ((value shl 8) and 0xff).toByte()
-        memory[offset + 1] = (value and 0xff).toByte()
+        writeU8(offset, value shl 8)
+        writeU8(offset + 1, value)
     }
 }
 
@@ -245,7 +251,7 @@ fun Int.hex(length: Int): String {
 class Operand(val type: OperandType, val value: Int) {
     override fun toString(): String {
         return when (type) {
-            OperandType.Large -> "#" + value.hex(2)
+            OperandType.Large -> "#" + value.hex(4)
             OperandType.Small -> "#" + value.hex(2)
             OperandType.Variable -> if (value == 0) {
                 "(SP)+"
@@ -271,24 +277,16 @@ class Operand(val type: OperandType, val value: Int) {
 class Return(val retType: RetType, val value: Int) {
     override fun toString(): String {
         return when (retType) {
-            RetType.Indirect -> {
-                if (value == 0) {
-                    " -> -(SP)"
-                } else if (value > 0x10) {
-                    "-> G" + (value - 0x10).hex(2)
-                } else {
-                    "-> L" + (value - 1).hex(2)
-                }
+            RetType.Indirect -> when {
+                value == 0 -> " -> (SP)"
+                value > 0x10 -> "-> G" + (value - 0x10).hex(2)
+                else -> "-> L" + (value - 1).hex(2)
             }
 
-            RetType.Variable -> {
-                if (value == 0) {
-                    " -> (SP)"
-                } else if (value > 0x10) {
-                    "-> G" + (value - 0x10).hex(2)
-                } else {
-                    "-> L" + (value - 1).hex(2)
-                }
+            RetType.Variable -> when {
+                value == 0 -> " -> -(SP)"
+                value > 0x10 -> "-> G" + (value - 0x10).hex(2)
+                else -> "-> L" + (value - 1).hex(2)
             }
 
             RetType.Omitted -> ""
@@ -296,13 +294,15 @@ class Return(val retType: RetType, val value: Int) {
     }
 }
 
-class Instruction(private val memory: Memory, private val ip: Int) {
+class Instruction(private val memory: Memory, val ip: Int) {
     private var optype = Encoding.Op0
     private var opcode = 0
     var name = ""
     var length = 0
     var ret = Return(RetType.Omitted, 0)
     var args: Array<Operand> = arrayOf()
+    var jumpOffset: Int? = null
+    var compare: Boolean? = null
     var string: ZString? = null
 
     init {
@@ -317,7 +317,6 @@ class Instruction(private val memory: Memory, private val ip: Int) {
         addBranch()
         addPrint()
     }
-
 
     private fun decodeShort(op: Int) {
         opcode = op and 0xf
@@ -382,7 +381,7 @@ class Instruction(private val memory: Memory, private val ip: Int) {
                 3 -> args
                 2 -> {
                     length += 1
-                    args.plusElement(Operand(OperandType.Variable, memory.readU8(ip * length - 1)))
+                    args.plusElement(Operand(OperandType.Variable, memory.readU8(ip + length - 1)))
                 }
 
                 1 -> {
@@ -426,7 +425,31 @@ class Instruction(private val memory: Memory, private val ip: Int) {
     }
 
     private fun addBranch() {
-
+        if (when (optype) {
+                Encoding.Op2 -> (opcode in 1..7) || opcode == 10
+                Encoding.Op1 -> (opcode <= 2)
+                Encoding.Op0 -> (opcode in arrayOf(5, 6, 0xd, 0xf))
+                else -> false
+            }
+        ) {
+            val branch1 = memory.readU8(ip + length)
+            var (offset, len) =
+                branch1.and(0x80).shl(8).let {
+                    if (branch1.and(0x40) != 0) {
+                        Pair(it.or(branch1.and(0x3f)), 1)
+                    } else {
+                        val branch2 = memory.readU8(ip + length + 1)
+                        Pair(it.or(branch1.and(0x1f).shl(8)).or(branch2), 2)
+                    }
+                }
+            compare = offset.and(0x8000) != 0
+            offset = offset.and(0x7fff)
+            if (offset > 0x0fff) {
+                offset = -(0x1fff - offset + 1)
+            }
+            jumpOffset = offset
+            length += len
+        }
     }
 
     private fun addPrint() {
@@ -440,8 +463,16 @@ class Instruction(private val memory: Memory, private val ip: Int) {
         val dispArgs = args.joinToString { "$it" }
         val dispName = name.uppercase()
         val offset = ip.hex(8).uppercase()
-        val dispString = string?.let { "\"$it\"" } ?: ""
-        return "[$offset] $dispName\t$dispArgs$ret$dispString"
+        val dispCompare = compare?.let { " [$compare]".uppercase() } ?: ""
+        val dispOffset = jumpOffset?.let {
+            when (it) {
+                0 -> " RFALSE"
+                1 -> " RTRUE"
+                else -> " " + (ip + length + it - 2).hex(8).uppercase()
+            }
+        } ?: ""
+        val dispString = string?.let { " \"$it\"" } ?: ""
+        return "[$offset] $dispName\t$dispArgs$ret$dispCompare$dispOffset$dispString"
     }
 }
 
@@ -556,8 +587,21 @@ class Machine(private var memory: Memory, private val header: Header) {
         ip = frame.returnAddr
     }
 
+    private fun jump(i: Instruction, compare: Boolean) {
+        if (compare == i.compare) {
+            when (val offset = i.jumpOffset!!) {
+                0 -> ret(0)
+                1 -> ret(1)
+                else -> {
+                    ip = i.ip + i.length + offset - 2
+                }
+            }
+        }
+    }
+
     private fun execute(i: Instruction) {
         val startIP = ip
+        println("$i")
         when (i.name) {
             "call" -> call(i)
             "print" -> i.string?.let { print(it) }
@@ -565,6 +609,13 @@ class Machine(private var memory: Memory, private val header: Header) {
             "rfalse" -> ret(0)
             "store" -> i.vars().let { (x, y) -> writeVar(Return(RetType.Indirect, x), y) }
             "print_paddr" -> i.vars().let { (x) -> print(ZString(memory, paddr(x))) }
+            "jz" -> i.vars().let { (x) -> jump(i, x == 0) }
+            "add" -> i.vars().let { (x, y) -> writeVar(i.ret, (x + y).mod(0x10000)) }
+            "print_num" -> i.vars().let { (x) -> print(x) }
+            "jump" -> i.vars().let { (x) -> ip += i.length + x - 2 }
+            "je" -> i.vars().let { (x) -> jump(i, i.args.drop(1).any { y -> x == readVar(y) }) }
+            "jg" -> i.vars().let { (x, y) -> jump(i, x.toShort() > y.toShort()) }
+            "jl" -> i.vars().let { (x, y) -> jump(i, x.toShort() < y.toShort()) }
             "inc" -> {
                 val (x) = i.args.map { readDirect(it) }
                 val old = readVar(Operand(OperandType.Variable, x))
@@ -573,7 +624,7 @@ class Machine(private var memory: Memory, private val header: Header) {
             }
 
             else -> {
-                println("Unknown instruction:\n$i")
+                println("\n---------------\nUnknown instruction:\n$i")
                 finished = true
                 return
             }
