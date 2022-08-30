@@ -233,29 +233,29 @@ enum class RetType {
     Variable, Indirect, Omitted
 }
 
-fun Int.hex(): String {
-    return toString(16).padStart(2, '0')
+fun Int.hex(length: Int): String {
+    return toString(16).padStart(length, '0')
 }
 
 class Operand(val type: OperandType, val value: Int) {
-    fun display(): String {
+    override fun toString(): String {
         return when (type) {
-            OperandType.Large -> "#" + value.hex()
-            OperandType.Small -> "#" + value.hex()
+            OperandType.Large -> "#" + value.hex(2)
+            OperandType.Small -> "#" + value.hex(2)
             OperandType.Variable -> if (value == 0) {
                 "(SP)+"
             } else if (this.value > 0x10) {
-                "G" + (value - 0x10).hex()
+                "G" + (value - 0x10).hex(2)
             } else {
-                "L" + (value - 1).hex()
+                "L" + (value - 1).hex(2)
             }
 
             OperandType.Indirect -> if (value == 0) {
                 "[(SP)]"
             } else if (value > 0x10) {
-                "[G" + (value - 0x10).hex() + "]"
+                "[G" + (value - 0x10).hex(2) + "]"
             } else {
-                "[L" + (value - 1).hex() + "]"
+                "[L" + (value - 1).hex(2) + "]"
             }
 
             OperandType.Omitted -> ""
@@ -264,15 +264,15 @@ class Operand(val type: OperandType, val value: Int) {
 }
 
 class Return(val retType: RetType, val value: Int) {
-    fun display(): String {
+    override fun toString(): String {
         return when (retType) {
             RetType.Indirect -> {
                 if (value == 0) {
                     " -> -(SP)"
                 } else if (value > 0x10) {
-                    "-> G" + (value - 0x10).hex()
+                    "-> G" + (value - 0x10).hex(2)
                 } else {
-                    "-> L" + (value - 1).hex()
+                    "-> L" + (value - 1).hex(2)
                 }
             }
 
@@ -280,9 +280,9 @@ class Return(val retType: RetType, val value: Int) {
                 if (value == 0) {
                     " -> (SP)"
                 } else if (value > 0x10) {
-                    "-> G" + (value - 0x10).hex()
+                    "-> G" + (value - 0x10).hex(2)
                 } else {
-                    "-> L" + (value - 1).hex()
+                    "-> L" + (value - 1).hex(2)
                 }
             }
 
@@ -312,6 +312,7 @@ class Instruction(private val memory: Memory, private val ip: Int) {
         addBranch()
         addPrint()
     }
+
 
     private fun decodeShort(op: Int) {
         opcode = op and 0xf
@@ -430,29 +431,32 @@ class Instruction(private val memory: Memory, private val ip: Int) {
         }
     }
 
-    fun display(): String {
-        val dispArgs = args.joinToString { it.display() }
+    override fun toString(): String {
+        val dispArgs = args.joinToString { "$it" }
         val dispName = name.uppercase()
-        val offset = ip.toString(16).padStart(8, '0').uppercase()
-        val dispReturn = ret.display()
+        val offset = ip.hex(8).uppercase()
         val dispString = string?.contents?.let { "\"$it\"" } ?: ""
-        return "[$offset] $dispName\t$dispArgs$dispReturn$dispString"
+        return "[$offset] $dispName\t$dispArgs$ret$dispString"
     }
 }
 
-class Frame(val addr: Int, val stackStart: Int, val numLocals: Int, val returnStorage: Return, val returnAddr: Int)
+data class Frame(val addr: Int, val stackStart: Int, val numLocals: Int, val returnStorage: Return, val returnAddr: Int)
 
 class Machine(private var memory: Memory, private val header: Header) {
-    private var finished: Boolean = false
-    private var ip: Int = memory.readU16(0x6)
-    private var stack: ArrayList<Int> = ArrayList<Int>()
-    private var frames: ArrayList<Frame> = ArrayList<Frame>()
+    private var finished = false
+    private var ip = memory.readU16(0x6)
+    private var stack = ArrayList<Int>()
+    private var frames = ArrayList<Frame>()
 
     fun run() {
         while (!finished) {
             val instruction = Instruction(memory, ip)
             execute(instruction)
         }
+    }
+
+    private fun Instruction.vars(): List<Int> {
+        return args.map { readVar(it) }
     }
 
     private fun writeLocal(v: Int, value: Int) {
@@ -471,6 +475,10 @@ class Machine(private var memory: Memory, private val header: Header) {
         } else {
             0
         }
+    }
+
+    private fun readDirect(v: Operand): Int {
+        return readVar(v)
     }
 
     private fun readGlobal(v: Int): Int {
@@ -537,22 +545,43 @@ class Machine(private var memory: Memory, private val header: Header) {
         }
     }
 
+    private fun ret(value: Int) {
+        val frame = frames.pop()
+        while (stack.lastIndex > frame.stackStart) {
+            stack.pop()
+        }
+        writeVar(frame.returnStorage, value)
+        ip = frame.returnAddr
+    }
+
     private fun execute(i: Instruction) {
         val startIP = ip
         when (i.name) {
             "call" -> call(i)
+            "print" -> print(i.string!!.contents)
+            "rtrue" -> ret(1)
+            "rfalse" -> ret(0)
             "store" -> {
-                val (x, y) = i.args.map { readVar(it) }
+                val (x, y) = i.vars()
                 writeVar(Return(RetType.Indirect, x), y)
             }
 
-            "print" -> {
-                print(i.string!!.contents)
+            "print_paddr" -> {
+                val (x) = i.vars()
+                val paddr = header.dynamicStart + 2 * x
+                val s = ZString(memory, paddr, null)
+                print(s.contents)
+            }
+
+            "inc" -> {
+                val (x) = i.args.map { readDirect(it) }
+                val old = readVar(Operand(OperandType.Variable, x))
+                val inc = (old + 1).mod(0x10000)
+                writeVar(Return(RetType.Variable, x), inc)
             }
 
             else -> {
-                val inst = i.display()
-                println("Unknown instruction:\n$inst")
+                println("Unknown instruction:\n$i")
                 finished = true
                 return
             }
@@ -577,7 +606,7 @@ fun readAllBytes(filename: String): ByteArray {
 
         memScoped {
             val buffer = allocArray<ByteVar>(len.toInt())
-            val readCount = read(fh, buffer, len.toULong());
+            val readCount = read(fh, buffer, len.toULong())
 
             if (readCount.toULong() != len.toULong()) {
                 throw IllegalStateException("Error when reading $filename")
@@ -594,5 +623,5 @@ fun main(args: Array<String>) {
     val memory = Memory(readAllBytes(args.firstOrNull() ?: "czech.z3"))
     val header = Header(memory)
     val machine = Machine(memory, header)
-    machine.run();
+    machine.run()
 }
