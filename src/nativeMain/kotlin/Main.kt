@@ -125,9 +125,10 @@ enum class ZStringShift {
     ZERO, ONE, TWO
 }
 
-class ZString(private val memory: Memory, private val offset: Int, private val maxLength: Int?) {
+class ZString(private val memory: Memory, private val offset: Int) {
     var length = 0
     var contents = ""
+    var maxLength: Int? = null
 
     init {
         var bytes = ArrayList<Byte>()
@@ -164,7 +165,7 @@ class ZString(private val memory: Memory, private val offset: Int, private val m
                         val table = memory.readU16(0x18)
                         val tableIndex = 32 * (c - 1) + abbrevIndex
                         val tableOffset = memory.readU16(table + tableIndex * 2)
-                        val abbrev = ZString(memory, tableOffset * 2, null)
+                        val abbrev = ZString(memory, tableOffset * 2)
                         contents += abbrev.contents
                     }
 
@@ -186,6 +187,10 @@ class ZString(private val memory: Memory, private val offset: Int, private val m
                 }
             }
         }
+    }
+
+    override fun toString(): String {
+        return contents
     }
 }
 
@@ -426,7 +431,7 @@ class Instruction(private val memory: Memory, private val ip: Int) {
 
     private fun addPrint() {
         if (optype == Encoding.Op0 && (opcode == 2 || opcode == 3)) {
-            string = ZString(memory, ip + length, null)
+            string = ZString(memory, ip + length)
             length += string!!.length
         }
     }
@@ -435,7 +440,7 @@ class Instruction(private val memory: Memory, private val ip: Int) {
         val dispArgs = args.joinToString { "$it" }
         val dispName = name.uppercase()
         val offset = ip.hex(8).uppercase()
-        val dispString = string?.contents?.let { "\"$it\"" } ?: ""
+        val dispString = string?.let { "\"$it\"" } ?: ""
         return "[$offset] $dispName\t$dispArgs$ret$dispString"
     }
 }
@@ -455,9 +460,8 @@ class Machine(private var memory: Memory, private val header: Header) {
         }
     }
 
-    private fun Instruction.vars(): List<Int> {
-        return args.map { readVar(it) }
-    }
+    private fun Instruction.vars() = args.map { readVar(it) }
+    private fun paddr(offset: Int) = header.dynamicStart + 2 * offset
 
     private fun writeLocal(v: Int, value: Int) {
         if (frames.size > 0) {
@@ -477,17 +481,15 @@ class Machine(private var memory: Memory, private val header: Header) {
         }
     }
 
-    private fun readDirect(v: Operand): Int {
-        return readVar(v)
-    }
+    private fun readDirect(v: Operand) = readVar(v)
 
     private fun readGlobal(v: Int): Int {
-        val offset = header.globals + header.dynamicStart + v * 2
+        val offset = header.globals + paddr(v)
         return memory.readU16(offset)
     }
 
     private fun writeGlobal(v: Int, value: Int) {
-        val offset = header.globals + header.dynamicStart + v * 2
+        val offset = header.globals + paddr(v)
         memory.writeU16(offset, value)
     }
 
@@ -524,7 +526,7 @@ class Machine(private var memory: Memory, private val header: Header) {
     }
 
     private fun call(i: Instruction) {
-        val addr = header.dynamicStart + readVar(i.args[0]) * 2
+        val addr = paddr(readVar(i.args[0]))
         val retAddr = ip + i.length
         val args = i.args.slice(1 until i.args.size).map { readVar(it) }
         if (addr - header.dynamicStart == 0) {
@@ -558,21 +560,11 @@ class Machine(private var memory: Memory, private val header: Header) {
         val startIP = ip
         when (i.name) {
             "call" -> call(i)
-            "print" -> print(i.string!!.contents)
+            "print" -> i.string?.let { print(it) }
             "rtrue" -> ret(1)
             "rfalse" -> ret(0)
-            "store" -> {
-                val (x, y) = i.vars()
-                writeVar(Return(RetType.Indirect, x), y)
-            }
-
-            "print_paddr" -> {
-                val (x) = i.vars()
-                val paddr = header.dynamicStart + 2 * x
-                val s = ZString(memory, paddr, null)
-                print(s.contents)
-            }
-
+            "store" -> i.vars().let { (x, y) -> writeVar(Return(RetType.Indirect, x), y) }
+            "print_paddr" -> i.vars().let { (x) -> print(ZString(memory, paddr(x))) }
             "inc" -> {
                 val (x) = i.args.map { readDirect(it) }
                 val old = readVar(Operand(OperandType.Variable, x))
