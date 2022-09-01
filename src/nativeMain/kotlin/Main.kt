@@ -216,7 +216,7 @@ class Memory(private val memory: ByteArray) {
     }
 
     fun writeU16(offset: Int, value: Int) {
-        writeU8(offset, value shl 8)
+        writeU8(offset, value shr 8)
         writeU8(offset + 1, value)
     }
 }
@@ -288,15 +288,12 @@ sealed class Return(val value: Int) {
                 value > 0x10 -> "-> G" + (value - 0x10).hex(2)
                 else -> "-> L" + (value - 1).hex(2)
             }
-
-            is ReturnOmitted -> ""
         }
     }
 }
 
 class ReturnIndirect(value: Int) : Return(value)
 class ReturnVariable(value: Int) : Return(value)
-class ReturnOmitted() : Return(0)
 
 class Instruction(private val memory: Memory, val ip: Int) {
     private var optype = Encoding.Op0
@@ -465,6 +462,7 @@ class Instruction(private val memory: Memory, val ip: Int) {
 
     override fun toString(): String {
         val dispArgs = args.joinToString { "$it" }
+        val dispRet = ret?.let { "$ret" } ?: ""
         val dispName = name.uppercase()
         val offset = ip.hex(8).uppercase()
         val dispCompare = compare?.let { " [$compare]".uppercase() } ?: ""
@@ -476,7 +474,7 @@ class Instruction(private val memory: Memory, val ip: Int) {
             }
         } ?: ""
         val dispString = string?.let { " \"$it\"" } ?: ""
-        return "[$offset] $dispName\t$dispArgs$ret$dispCompare$dispOffset$dispString"
+        return "[$offset] $dispName\t$dispArgs$dispRet$dispCompare$dispOffset$dispString"
     }
 }
 
@@ -501,14 +499,9 @@ class Machine(private var memory: Memory, private val header: Header) {
         }
     }
 
-    private fun Instruction.vars(transform: (List<Int>) -> Unit) = transform(args.map { readVar(it) })
-    private fun Instruction.direct(transform: (Int) -> Int) {
-        val (x) = args.map { readDirect(it) }
-        val value = readVar(Operand(OperandType.Variable, x))
-        writeVar(ReturnVariable(x), transform(value))
-    }
 
     private fun paddr(offset: Int) = header.dynamicStart + 2 * offset
+    private fun addr(offset: Int) = header.dynamicStart + offset
 
     private fun writeLocal(v: Int, value: Int) {
         if (frames.size > 0) {
@@ -528,7 +521,7 @@ class Machine(private var memory: Memory, private val header: Header) {
         }
     }
 
-    private fun readDirect(v: Operand) = readVar(v)
+    private fun readDirect(v: Operand) = readVar(v).toUByte().toInt()
 
     private fun readGlobal(v: Int): Int {
         val offset = header.globals + paddr(v)
@@ -562,8 +555,9 @@ class Machine(private var memory: Memory, private val header: Header) {
         if (v.value >= 0x10) {
             writeGlobal(v.value - 0x10, value)
         } else if (v.value == 0) {
-            if (v !is ReturnIndirect) {
-                stack.add(value)
+            when (v) {
+                is ReturnIndirect -> stack[stack.lastIndex] = value
+                is ReturnVariable -> stack.add(value)
             }
         } else {
             writeLocal(v.value - 1, value)
@@ -594,7 +588,7 @@ class Machine(private var memory: Memory, private val header: Header) {
 
     private fun ret(value: Int) {
         val frame = frames.pop()
-        while (stack.lastIndex > frame.stackStart) {
+        while (stack.lastIndex >= frame.stackStart) {
             stack.pop()
         }
         writeVar(frame.returnStorage!!, value)
@@ -613,28 +607,70 @@ class Machine(private var memory: Memory, private val header: Header) {
         }
     }
 
+    private fun <T> Instruction.r(o: Operand? = null, transform: (List<Int>) -> T): Pair<Instruction, T> {
+        return Pair(this, transform(o?.let { listOf(readVar(o)) } ?: args.map { readVar(it) }))
+    }
+
+    private fun Pair<Instruction, Int>.w(r: Return? = null) {
+        val (i, arg) = this
+        writeVar(r ?: i.ret!!, arg)
+    }
+
+    private fun <T> Pair<Instruction, T>.w(transform: (T) -> Pair<Return, Int>) {
+        val (_, arg) = this
+        val (ret, v) = transform(arg)
+        writeVar(ret, v)
+    }
+
+
+    private fun Instruction.direct(transform: (Int) -> Int) {
+        val (x) = args.map { readDirect(it) }
+        val value = readVar(Operand(OperandType.Variable, x))
+        writeVar(ReturnVariable(x), transform(value))
+    }
+
     private fun execute(i: Instruction) {
         val startIP = ip
-        //println("$i")
+        //println("$i (stack: $stack)")
         when (i.name) {
             "call" -> call(i)
             "print" -> i.string?.let { print(it) }
             "rtrue" -> ret(1)
             "rfalse" -> ret(0)
-            "store" -> i.vars { (x, y) -> writeVar(ReturnIndirect(x), y) }
-            "print_paddr" -> i.vars { (x) -> print(ZString(memory, paddr(x))) }
+            "store" -> i.r { x -> x }.w { (x, y) -> Pair(ReturnIndirect(x), y) }
+            "print_paddr" -> i.r { (x) -> print(ZString(memory, paddr(x))) }
             "inc" -> i.direct { x -> (x + 1).mod(0x10000) }
-            "jz" -> i.vars { (x) -> jump(i, x == 0) }
-            "add" -> i.vars { (x, y) -> writeVar(i.ret!!, (x + y).mod(0x10000)) }
-            "print_num" -> i.vars { (x) -> print(x) }
-            "jump" -> i.vars { (x) -> ip += i.length + x - 2 }
-            "je" -> i.vars { (x) -> jump(i, i.args.drop(1).any { y -> x == readVar(y) }) }
-            "jg" -> i.vars { (x, y) -> jump(i, x.toShort() > y.toShort()) }
-            "jl" -> i.vars { (x, y) -> jump(i, x.toShort() < y.toShort()) }
-            "push" -> i.vars { (x) -> writeVar(ReturnVariable(0), x) }
-            "pop" -> readVar(Operand(OperandType.Variable, 0))
-            "pull" -> i.args.map { readDirect(it) }.let { (x) ->
-                writeVar(ReturnIndirect(x), readVar(Operand(OperandType.Variable, 0)))
+            "dec" -> i.direct { x -> (x - 1).mod(0x10000) }
+            "jz" -> i.r { (x) -> jump(i, x == 0) }
+            "add" -> i.r { (x, y) -> (x + y).mod(0x10000) }.w()
+            "sub" -> i.r { (x, y) -> (x - y).mod(0x10000) }.w()
+            "mul" -> i.r { (x, y) -> (x * y).mod(0x10000) }.w()
+            "div" -> i.r { (x, y) -> (x.toShort() / y.toShort()).toUShort().toInt() }.w()
+            "mod" -> i.r { (x, y) -> (x.toShort() % y.toShort()).toUShort().toInt() }.w()
+            "not" -> i.r { (x) -> x.inv().and(0xffff) }.w()
+            "and" -> i.r { (x, y) -> x.and(y) }.w()
+            "or" -> i.r { (x, y) -> x.or(y) }.w()
+            "loadw" -> i.r { (x, y) -> memory.readU16(paddr(y) + x) }.w()
+            "loadb" -> i.r { (x, y) -> memory.readU8(addr(x + y)) }.w()
+            "storew" -> i.r { (x, y, z) -> memory.writeU16(paddr(y) + x, z) }
+            "storeb" -> i.r { (x, y, z) -> memory.writeU8(addr(x + y), z) }
+            "print_num" -> i.r { (x) -> print(x) }
+            "jump" -> i.r { (x) -> ip += i.length + x - 2 }
+            "je" -> i.r { (x) -> jump(i, i.args.drop(1).any { y -> x == readVar(y) }) }
+            "jg" -> i.r { (x, y) -> jump(i, x.toShort() > y.toShort()) }
+            "jl" -> i.r { (x, y) -> jump(i, x.toShort() < y.toShort()) }
+            "push" -> i.r { (x) -> stack.add(x) }
+            "pop" -> stack.pop()
+            "pull" -> i.r { (x) -> listOf(x, stack.pop()) }.w { (x, y) -> Pair(ReturnIndirect(x), y) }
+            "load" -> i.r { (x) -> readVar(Operand(OperandType.Indirect, x)) }.w()
+            "ret" -> i.r { (x) -> ret(x) }
+            "ret_popped" -> ret(stack.pop())
+            "dec_chk" -> i.direct { x ->
+                (x - 1).mod(0x10000).also { i.r { (_, y) -> jump(i, it.toShort() < y.toShort()) } }
+            }
+
+            "inc_chk" -> i.direct { x ->
+                (x + 1).mod(0x10000).also { i.r { (_, y) -> jump(i, it.toShort() > y.toShort()) } }
             }
 
             else -> {
