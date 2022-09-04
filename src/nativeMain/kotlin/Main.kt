@@ -524,7 +524,7 @@ class Object(private val memory: Memory, val index: Int) {
         set(value) = memory.writeU8(addr + 4, value)
     var sibling
         get() = memory.readU8(addr + 5)
-        set(value) = memory.writeU16(addr + 5, value)
+        set(value) = memory.writeU8(addr + 5, value)
     var child
         get() = memory.readU8(addr + 6)
         set(value) = memory.writeU8(addr + 6, value)
@@ -553,6 +553,25 @@ class Object(private val memory: Memory, val index: Int) {
                 else -> p = p.next
             }
         }
+    }
+
+    fun remove(): Object {
+        if (parent != 0) {
+            var p = Object(memory, parent)
+            var c = Object(memory, p.child)
+
+            if (c.index == index) {
+                p.child = sibling
+            } else {
+                while (c.sibling != index) {
+                    c = Object(memory, c.sibling)
+                }
+                c.sibling = sibling
+            }
+        }
+        parent = 0
+        sibling = 0
+        return this
     }
 }
 
@@ -744,6 +763,17 @@ class Machine(private var memory: Memory, private val header: Header) {
             "get_prop_len" -> i.r { (x) -> Property(memory, x - 1).length }.w()
             "get_prop" -> i.r { (x, y) -> obj(x).getProperty(y).value }.w()
             "put_prop" -> i.r { (x, y, z) -> obj(x).getProperty(y).value = z }
+            "remove_obj" -> i.r { (x) -> obj(x).remove() }
+            "insert_obj" -> i.r { (x, y) ->
+                {
+                    val src = obj(x).remove()
+                    val dest = obj(y)
+                    src.sibling = dest.child
+                    src.parent = dest.index
+                    dest.child = src.index
+                }
+            }
+
             "jin" -> i.r { (x, y) -> jump(i, obj(x).parent == y) }
             "test_attr" -> i.r { (x, y) -> jump(i, obj(x).attrib.and(1.shl(31 - y)) != 0) }
             "set_attr" -> i.r { (x, y) -> obj(x).attrib = obj(x).attrib or 1.shl(31 - y) }
