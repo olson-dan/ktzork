@@ -573,6 +573,14 @@ class Object(private val memory: Memory, val index: Int) {
         sibling = 0
         return this
     }
+
+    fun insert(other: Int) {
+        remove()
+        var dest = Object(memory, other)
+        sibling = dest.child
+        parent = dest.index
+        dest.child = index
+    }
 }
 
 class Machine(private var memory: Memory, private val header: Header) {
@@ -764,16 +772,7 @@ class Machine(private var memory: Memory, private val header: Header) {
             "get_prop" -> i.r { (x, y) -> obj(x).getProperty(y).value }.w()
             "put_prop" -> i.r { (x, y, z) -> obj(x).getProperty(y).value = z }
             "remove_obj" -> i.r { (x) -> obj(x).remove() }
-            "insert_obj" -> i.r { (x, y) ->
-                {
-                    val src = obj(x).remove()
-                    val dest = obj(y)
-                    src.sibling = dest.child
-                    src.parent = dest.index
-                    dest.child = src.index
-                }
-            }
-
+            "insert_obj" -> i.r { (x, y) -> obj(x).insert(y) }
             "jin" -> i.r { (x, y) -> jump(i, obj(x).parent == y) }
             "test_attr" -> i.r { (x, y) -> jump(i, obj(x).attrib.and(1.shl(31 - y)) != 0) }
             "set_attr" -> i.r { (x, y) -> obj(x).attrib = obj(x).attrib or 1.shl(31 - y) }
