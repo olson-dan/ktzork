@@ -486,6 +486,76 @@ data class Frame(
     val returnAddr: Int
 )
 
+open class Property(private val memory: Memory, val offset: Int) {
+    private val size = memory.readU8(offset)
+    val index = size.and(31)
+    val length = size.and(0xe0).shr(5) + 1
+    var value
+        get() = if (length == 1) {
+            memory.readU8(offset + 1)
+        } else {
+            memory.readU16(offset + 1)
+        }
+        set(v) = if (length == 1) {
+            memory.writeU8(offset + 1, v)
+        } else {
+            memory.writeU16(offset + 1, v)
+        }
+    val next get() = Property(memory, offset + length + 1)
+}
+
+class PropertyDefault(memory: Memory, index: Int) : Property(memory, memory.readU16(0xa) + (index - 1) * 2)
+
+const val NUM_OBJECT_DEFAULTS = 31
+const val OBJECT_SIZE = 9
+const val OBJECT_DEFAULT_TABLE_SIZE = NUM_OBJECT_DEFAULTS * 2
+
+class Object(private val memory: Memory, val index: Int) {
+    private val addr = memory.readU16(0xa) + OBJECT_DEFAULT_TABLE_SIZE + (index - 1) * OBJECT_SIZE
+    val offset = memory.readU16(addr + 7)
+    var attrib
+        get() = memory.readU16(addr).shl(16).or(memory.readU16(addr + 2))
+        set(value) {
+            memory.writeU16(addr, value.shr(16))
+            memory.writeU16(addr + 2, value)
+        }
+    var parent
+        get() = memory.readU8(addr + 4)
+        set(value) = memory.writeU8(addr + 4, value)
+    var sibling
+        get() = memory.readU8(addr + 5)
+        set(value) = memory.writeU16(addr + 5, value)
+    var child
+        get() = memory.readU8(addr + 6)
+        set(value) = memory.writeU8(addr + 6, value)
+    val name get() = ZString(memory, offset + 1)
+
+    fun getProperty(index: Int): Property {
+        var p = Property(memory, offset + 1 + name.length)
+        while (true) {
+            when (p.index) {
+                index -> return p
+                0 -> return PropertyDefault(memory, index)
+                else -> p = p.next
+            }
+        }
+    }
+
+    fun getNextProperty(index: Int): Int {
+        var p = Property(memory, offset + 1 + name.length)
+        if (index == 0) {
+            return p.index
+        }
+        while (true) {
+            when (p.index) {
+                index -> return p.next.index
+                0 -> return 0
+                else -> p = p.next
+            }
+        }
+    }
+}
+
 class Machine(private var memory: Memory, private val header: Header) {
     private var finished = false
     private var ip = memory.readU16(0x6)
@@ -502,6 +572,7 @@ class Machine(private var memory: Memory, private val header: Header) {
 
     private fun paddr(offset: Int) = header.dynamicStart + 2 * offset
     private fun addr(offset: Int) = header.dynamicStart + offset
+    private fun obj(index: Int) = Object(memory, index)
 
     private fun writeLocal(v: Int, value: Int) {
         if (frames.size > 0) {
@@ -608,7 +679,7 @@ class Machine(private var memory: Memory, private val header: Header) {
     }
 
     private fun <T> Instruction.r(o: Operand? = null, transform: (List<Int>) -> T): Pair<Instruction, T> {
-        return Pair(this, transform(o?.let { listOf(readVar(o)) } ?: args.map { readVar(it) }))
+        return Pair(this, transform(o?.let { listOf(readVar(it)) } ?: args.map { readVar(it) }))
     }
 
     private fun Pair<Instruction, Int>.w(r: Return? = null) {
@@ -655,7 +726,7 @@ class Machine(private var memory: Memory, private val header: Header) {
             "storew" -> i.r { (x, y, z) -> memory.writeU16(paddr(y) + x, z) }
             "storeb" -> i.r { (x, y, z) -> memory.writeU8(addr(x + y), z) }
             "print_num" -> i.r { (x) -> print(x) }
-            "jump" -> i.r { (x) -> ip += i.length + x - 2 }
+            "jump" -> i.r { (x) -> ip += i.length + x.toShort().toInt() - 2 }
             "je" -> i.r { (x) -> jump(i, i.args.drop(1).any { y -> x == readVar(y) }) }
             "jg" -> i.r { (x, y) -> jump(i, x.toShort() > y.toShort()) }
             "jl" -> i.r { (x, y) -> jump(i, x.toShort() < y.toShort()) }
@@ -665,6 +736,18 @@ class Machine(private var memory: Memory, private val header: Header) {
             "load" -> i.r { (x) -> readVar(Operand(OperandType.Indirect, x)) }.w()
             "ret" -> i.r { (x) -> ret(x) }
             "ret_popped" -> ret(stack.pop())
+            "get_parent" -> i.r { (x) -> obj(x).parent }.w()
+            "get_sibling" -> i.r { (x) -> obj(x).sibling }.also { (_, x) -> jump(i, x != 0) }.w()
+            "get_child" -> i.r { (x) -> obj(x).child }.also { (_, x) -> jump(i, x != 0) }.w()
+            "get_next_prop" -> i.r { (x, y) -> obj(x).getNextProperty(y) }.w()
+            "get_prop_addr" -> i.r { (x, y) -> obj(x).getProperty(y).offset + 1 }.w()
+            "get_prop_len" -> i.r { (x) -> Property(memory, x - 1).length }.w()
+            "get_prop" -> i.r { (x, y) -> obj(x).getProperty(y).value }.w()
+            "put_prop" -> i.r { (x, y, z) -> obj(x).getProperty(y).value = z }
+            "jin" -> i.r { (x, y) -> jump(i, obj(x).parent == y) }
+            "test_attr" -> i.r { (x, y) -> jump(i, obj(x).attrib.and(1.shl(31 - y)) != 0) }
+            "set_attr" -> i.r { (x, y) -> obj(x).attrib = obj(x).attrib or 1.shl(31 - y) }
+            "clear_attr" -> i.r { (x, y) -> obj(x).attrib = obj(x).attrib and 1.shl(31 - y).inv() }
             "dec_chk" -> i.direct { x ->
                 (x - 1).mod(0x10000).also { i.r { (_, y) -> jump(i, it.toShort() < y.toShort()) } }
             }
