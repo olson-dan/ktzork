@@ -4,6 +4,7 @@ import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.readBytes
 import platform.posix.*
 import kotlin.math.min
+import kotlin.random.Random
 
 
 fun <T> ArrayList<T>.pop(): T {
@@ -555,7 +556,7 @@ class Object(private val memory: Memory, val index: Int) {
         }
     }
 
-    fun remove(): Object {
+    fun remove() {
         if (parent != 0) {
             var p = Object(memory, parent)
             var c = Object(memory, p.child)
@@ -571,7 +572,6 @@ class Object(private val memory: Memory, val index: Int) {
         }
         parent = 0
         sibling = 0
-        return this
     }
 
     fun insert(other: Int) {
@@ -588,6 +588,7 @@ class Machine(private var memory: Memory, private val header: Header) {
     private var ip = memory.readU16(0x6)
     private var stack = ArrayList<Int>()
     private var frames = ArrayList<Frame>()
+    private var random = Random(0)
 
     fun run() {
         while (!finished) {
@@ -752,7 +753,7 @@ class Machine(private var memory: Memory, private val header: Header) {
             "loadb" -> i.r { (x, y) -> memory.readU8(addr(x + y)) }.w()
             "storew" -> i.r { (x, y, z) -> memory.writeU16(paddr(y) + x, z) }
             "storeb" -> i.r { (x, y, z) -> memory.writeU8(addr(x + y), z) }
-            "print_num" -> i.r { (x) -> print(x) }
+            "print_num" -> i.r { (x) -> print(x.toShort()) }
             "jump" -> i.r { (x) -> ip += i.length + x.toShort().toInt() - 2 }
             "je" -> i.r { (x) -> jump(i, i.args.drop(1).any { y -> x == readVar(y) }) }
             "jg" -> i.r { (x, y) -> jump(i, x.toShort() > y.toShort()) }
@@ -777,13 +778,31 @@ class Machine(private var memory: Memory, private val header: Header) {
             "test_attr" -> i.r { (x, y) -> jump(i, obj(x).attrib.and(1.shl(31 - y)) != 0) }
             "set_attr" -> i.r { (x, y) -> obj(x).attrib = obj(x).attrib or 1.shl(31 - y) }
             "clear_attr" -> i.r { (x, y) -> obj(x).attrib = obj(x).attrib and 1.shl(31 - y).inv() }
+            "test" -> i.r { (x, y) -> jump(i, x.and(y) == y) }
+            "verify" -> jump(i, true)
+            "print_char" -> i.r { (x) -> print(x.toChar()) }
+            "new_line" -> println()
+            "print_ret" -> i.string?.let { println(it) }.also { ret(1) }
+            "print_addr" -> i.r { (x) -> print(ZString(memory, addr(x))) }
+            "print_obj" -> i.r { (x) -> print(obj(x).name) }
+            "quit" -> finished = true
+            "random" -> i.r { (x) ->
+                if (x.toShort() < 0) {
+                    random = Random(x.toLong())
+                    0
+                } else {
+                    random.nextInt().toUShort().toInt() + 1
+                }
+            }.w()
+
             "dec_chk" -> i.direct { x ->
-                (x - 1).mod(0x10000).also { i.r { (_, y) -> jump(i, it.toShort() < y.toShort()) } }
+                (x - 1).mod(0x10000).also { jump(i, it.toShort() < readVar(i.args[1]).toShort()) }
             }
 
             "inc_chk" -> i.direct { x ->
-                (x + 1).mod(0x10000).also { i.r { (_, y) -> jump(i, it.toShort() > y.toShort()) } }
+                (x + 1).mod(0x10000).also { jump(i, it.toShort() > readVar(i.args[1]).toShort()) }
             }
+
 
             else -> {
                 println("\n---------------\nUnknown instruction:\n$i")
