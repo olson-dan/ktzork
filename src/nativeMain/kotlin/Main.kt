@@ -134,8 +134,8 @@ open class ZString(private val memory: Memory, private val offset: Int) {
         withBytes(memory, decode(null))
     }
 
-    protected fun decode(maxLength: Int?): ByteArray {
-        var bytes = ArrayList<Byte>()
+    private fun decode(maxLength: Int?): ByteArray {
+        val bytes = ArrayList<Byte>()
         while (true) {
             if (length == maxLength) {
                 break
@@ -154,7 +154,7 @@ open class ZString(private val memory: Memory, private val offset: Int) {
         return bytes.toByteArray()
     }
 
-    protected fun withBytes(memory: Memory, bytes: ByteArray) {
+    private fun withBytes(memory: Memory, bytes: ByteArray) {
         var shift = ZStringShift.ZERO
         var skipCount = 0
         bytes.forEachIndexed { index, c ->
@@ -199,13 +199,6 @@ open class ZString(private val memory: Memory, private val offset: Int) {
     }
 }
 
-class ZStringFixed(private val memory: Memory, private val offset: Int, private val maxLength: Int) :
-    ZString(memory, offset) {
-    init {
-        withBytes(memory, decode(null))
-    }
-}
-
 class Memory(private val memory: ByteArray) {
     val length = memory.size
 
@@ -239,10 +232,6 @@ enum class Encoding {
 
 enum class OperandType {
     Large, Small, Variable, Indirect, Omitted
-}
-
-enum class RetType {
-    Variable, Indirect, Omitted
 }
 
 fun Int.hex(length: Int): String {
@@ -558,7 +547,7 @@ class Object(private val memory: Memory, val index: Int) {
 
     fun remove() {
         if (parent != 0) {
-            var p = Object(memory, parent)
+            val p = Object(memory, parent)
             var c = Object(memory, p.child)
 
             if (c.index == index) {
@@ -576,7 +565,7 @@ class Object(private val memory: Memory, val index: Int) {
 
     fun insert(other: Int) {
         remove()
-        var dest = Object(memory, other)
+        val dest = Object(memory, other)
         sibling = dest.child
         parent = dest.index
         dest.child = index
@@ -755,7 +744,7 @@ class Machine(private var memory: Memory, private val header: Header) {
             "storeb" -> i.r { (x, y, z) -> memory.writeU8(addr(x + y), z) }
             "print_num" -> i.r { (x) -> print(x.toShort()) }
             "jump" -> i.r { (x) -> ip += i.length + x.toShort().toInt() - 2 }
-            "je" -> i.r { (x) -> jump(i, i.args.drop(1).any { y -> x == readVar(y) }) }
+            "je" -> i.r { x -> jump(i, x.drop(1).any { y -> x[0] == y }) }
             "jg" -> i.r { (x, y) -> jump(i, x.toShort() > y.toShort()) }
             "jl" -> i.r { (x, y) -> jump(i, x.toShort() < y.toShort()) }
             "push" -> i.r { (x) -> stack.add(x) }
@@ -844,7 +833,7 @@ fun readAllBytes(filename: String): ByteArray {
 }
 
 fun main(args: Array<String>) {
-    val memory = Memory(readAllBytes(args.firstOrNull() ?: "czech.z3"))
+    val memory = Memory(readAllBytes(args.firstOrNull() ?: "zork.z3"))
     val header = Header(memory)
     val machine = Machine(memory, header)
     machine.run()

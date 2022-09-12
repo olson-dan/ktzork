@@ -1,0 +1,1 @@
+* Doesn't handle JE with an (SP)+ argument, so if the args are evaluated twice it will not be caught.
