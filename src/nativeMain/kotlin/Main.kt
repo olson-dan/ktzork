@@ -126,12 +126,12 @@ enum class ZStringShift {
     ZERO, ONE, TWO
 }
 
-open class ZString(private val memory: Memory, private val offset: Int) {
+class ZString(private val memory: Memory, val offset: Int, maxLength: Int? = null) {
     var length = 0
     var contents = ""
 
     init {
-        withBytes(memory, decode(null))
+        withBytes(memory, decode(maxLength))
     }
 
     private fun decode(maxLength: Int?): ByteArray {
@@ -572,12 +572,37 @@ class Object(private val memory: Memory, val index: Int) {
     }
 }
 
+class Dictionary(memory: Memory, offset: Int) {
+    private val numSeparators = memory.readU8(offset)
+    val separators = CharArray(numSeparators) {
+        memory.readU8(offset + it + 1).toChar()
+    }
+    private val entryStart = offset + numSeparators + 1
+    private val entryLength = memory.readU8(entryStart)
+    private val numEntries = memory.readU16(entryStart + 1)
+    private val words = Array<ZString>(numEntries) {
+        ZString(memory, entryStart + 3 + it * entryLength, 4)
+    }
+
+    fun getWord(token: String): Int? {
+        for (word in words) {
+            if (word.contents.length < 6 && word.contents == token) {
+                return word.offset
+            } else if (token.startsWith(word.contents)) {
+                return word.offset
+            }
+        }
+        return null
+    }
+}
+
 class Machine(private var memory: Memory, private val header: Header) {
     private var finished = false
     private var ip = memory.readU16(0x6)
     private var stack = ArrayList<Int>()
     private var frames = ArrayList<Frame>()
     private var random = Random(0)
+    private val dictionary = Dictionary(memory, memory.readU16(0x8))
 
     fun run() {
         while (!finished) {
@@ -695,6 +720,25 @@ class Machine(private var memory: Memory, private val header: Header) {
         }
     }
 
+    private fun sread(i: Instruction) {
+        val line = readLine()?.trim()?.lowercase() ?: ""
+        val x = addr(readVar(i.args[0]))
+        val y = addr(readVar(i.args[1]))
+        val maxLength = min(memory.readU8(x), line.length)
+        line.toCharArray().forEachIndexed { index, c -> memory.writeU8(x + 1 + index, c.code) }
+        memory.writeU8(x + maxLength + 1, 0)
+
+        val tokens = line.splitToSequence(' ', *dictionary.separators).filter { it.isNotEmpty() }.toList()
+        val maxParse = min(memory.readU8(y), tokens.size)
+        memory.writeU8(y + 1, maxParse)
+        tokens.forEachIndexed { index, s ->
+            val ofs = y + 2 + 4 * index
+            memory.writeU16(ofs, dictionary.getWord(s) ?: 0)
+            memory.writeU8(ofs + 2, s.length)
+            memory.writeU8(ofs + 3, line.indexOf(s) + 1)
+        }
+    }
+
     private fun <T> Instruction.r(o: Operand? = null, transform: (List<Int>) -> T): Pair<Instruction, T> {
         return Pair(this, transform(o?.let { listOf(readVar(it)) } ?: args.map { readVar(it) }))
     }
@@ -775,6 +819,7 @@ class Machine(private var memory: Memory, private val header: Header) {
             "print_addr" -> i.r { (x) -> print(ZString(memory, addr(x))) }
             "print_obj" -> i.r { (x) -> print(obj(x).name) }
             "quit" -> finished = true
+            "sread" -> sread(i)
             "random" -> i.r { (x) ->
                 if (x.toShort() < 0) {
                     random = Random(x.toLong())
